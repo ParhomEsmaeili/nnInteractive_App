@@ -16,7 +16,15 @@ from nnunetv2.utilities.helpers import empty_cache
 
 
 class InferApp:
-    def __init__(self, infer_device, adaptation_config_name, algorithm_state, enable_adaptation, algo_cache_name):
+    def __init__(
+        self, 
+        infer_device, 
+        adaptation_config_name, 
+        algorithm_state, 
+        enable_adaptation, 
+        execute_on_adapted,
+        episode_number,
+        algo_cache_name):
         self.infer_device = infer_device
         if self.infer_device.type != 'cuda':
             raise ValueError('This script only should be used with CUDA inference device.')
