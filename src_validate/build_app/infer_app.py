@@ -16,10 +16,23 @@ from nnunetv2.utilities.helpers import empty_cache
 
 
 class InferApp:
-    def __init__(self, infer_device, adaptation_config_name, algorithm_state, enable_adaptation, algo_cache_name):
+    def __init__(
+        self, 
+        infer_device, 
+        dataset_level_schema: dict,
+        adaptation_config_name: str | None = None, 
+        algorithm_state: dict = {},
+        enable_adaptation: bool = False,
+        execute_on_adapted: bool = False,
+        episode_number: int | None = None,
+        algo_cache_name: str = ''):
         self.infer_device = infer_device
         if self.infer_device.type != 'cuda':
             raise ValueError('This script only should be used with CUDA inference device.')
+        
+        self.dataset_level_schema = dataset_level_schema
+        self.semantic_id_dict = dataset_level_schema['segmentation_task_schema']['semantic_id_dict']
+        
 
         self.autoseg_infer = False #This is a variable for storing the action taken in the instance where there is no prompting information provided in a slice.
         #In the case where it is True, a prediction will be made, and the stored pred and output pred will be the same.
@@ -136,8 +149,8 @@ class InferApp:
             points_lbs = p_dict[1][provided_ptypes[0] + '_labels']
 
             #Placing the background points first, then the foreground points.
-            bg_code = self.configs_labels_dict['background']
-            fg_code = self.configs_labels_dict[[k for k in self.configs_labels_dict.keys() if k != 'background'][0]]
+            bg_code = self.semantic_id_dict['background']
+            fg_code = self.semantic_id_dict[[k for k in self.semantic_id_dict.keys() if k != 'background'][0]]
 
             if bg_code != 0:
                 raise Exception('Script written assuming background is assigned class 0! Cannot proceed with inference!')
@@ -176,6 +189,9 @@ class InferApp:
             for box in bboxes:
                 if not any(box[0, i] == box[0, i+3] for i in range(3)):
                     warnings.warn('nnInteractive natively supports 2D bounding boxes, received a 3D bounding box in the request!')
+                #NOTE: Even if nnInteractive natively supports 2D bounding boxes, 3D bounding boxes
+                #will not be rejected. 
+
             #Now we convert the bounding boxes to the expected format, which is to have the bboxes represented by a half-open interval. As opposed to the 
             #closed interval representation used in the API. The upper bound is the open end.
             temp_bboxes = torch.cat(bboxes, dim=0)
@@ -206,7 +222,7 @@ class InferApp:
                 raise Exception('More than two class labels were provided bounding box prompts OR bbox label was outside of the [0,1] range! Cannot proceed with interactive inference!') 
             
             #First we will look at the background class, then the foreground class, because we want the center of the last interaction to be the foreground class.
-            bg_code = self.configs_labels_dict['background']
+            bg_code = self.semantic_id_dict['background']
             
             if bg_code != 0:
                 raise Exception('Script written assuming background is assigned class 0! Cannot proceed with inference!')
@@ -220,7 +236,7 @@ class InferApp:
                     include_interaction=False,
                     run_prediction=False
                 )
-            fg_code = self.configs_labels_dict[[k for k in self.configs_labels_dict.keys() if k != 'background'][0]]
+            fg_code = self.semantic_id_dict[[k for k in self.semantic_id_dict.keys() if k != 'background'][0]]
             if fg_code in bboxes_lbs:
                 fg_idx = (torch.cat(bboxes_lbs) == fg_code).nonzero(as_tuple=True)
                 if len(fg_idx[0]) > 1:
@@ -259,9 +275,16 @@ class InferApp:
 
 
     def binary_subject_prep(self, request:dict):
-        self.dataset_info = request['dataset_info']
-        if len(self.dataset_info['task_channels']) != 1:
+        if self.dataset_level_schema is None:
+            raise Exception('The dataset level schema must have been set during initialisation!')
+        else:
+            if self.dataset_level_schema['data_schema']['task_channels'] != request['sample_level_schema']['data_schema']['task_channels']:
+                raise Exception('The task channels provided in the sample level schema do not match the ones specified in the dataset level schema! Cannot proceed with inference!')
+        if len(request['sample_level_schema']['data_schema']['task_channels']) != 1:
             raise Exception('The inference app only supports single channel images for segmentation.')
+        
+        if request['sample_level_schema']['segmentation_task_schema']['semantic_id_dict'] != self.semantic_id_dict:
+            raise Exception('The semantic id dict provided in the sample level schema does not match the one stored in the algorithm state! Cannot proceed with inference!')
         
         if request['infer_mode'] == 'IS_interactive_edit':
             is_state = request['i_state']
@@ -275,7 +298,6 @@ class InferApp:
                 raise Exception('Cannot be an interactive request without interactive inputs.')
 
             init = True
-            self.configs_labels_dict = request['config_labels_dict']
             self.load_new_image(request['image']['metatensor'])
             self.session.reset_interactions()
             # self.prev_pred = None  We don't need this. The buffer is already reset.
@@ -295,11 +317,21 @@ class InferApp:
     
     def __call__(self, request:dict):
 
-        if len(request['config_labels_dict']) == 2:
+        #Let us extract the sample level schema's semantic id dict.
+        sample_level_schema = request.get('sample_level_schema', None)
+        if sample_level_schema == None:
+            raise Exception('The sample level schema must be provided in the inference request! Cannot proceed with inference!')
+        if sample_level_schema.get('segmentation_task_schema') == None:
+            raise Exception('The segmentation task schema must be provided in the sample level schema of the inference request! Cannot proceed with inference!')
+        if sample_level_schema['segmentation_task_schema'].get('semantic_id_dict') == None:
+            raise Exception('The semantic id dict must be provided in the segmentation task schema of the sample level schema of the inference request! Cannot proceed with inference!')
+        sample_level_semantic_id_dict = sample_level_schema['segmentation_task_schema']['semantic_id_dict']
+
+        if len(sample_level_semantic_id_dict) == 2:
             class_type = 'binary'
-        elif len(request['config_labels_dict']) > 2:
+        elif len(sample_level_semantic_id_dict) > 2:
             class_type = 'multi'
-            raise NotImplementedError('See the SegFM implementation for integrating multi-class segmentation interpretation.')
+            raise NotImplementedError('Multi-class segmentation not implemented, see SegFM implementation')
         else:
             raise Exception('Should not have received less than two class labels at minimum')
         
@@ -308,9 +340,12 @@ class InferApp:
 
         app = self.infer_apps[modif_request['infer_mode']][f'{class_type}_predict']
 
-        #Setting the configs label dictionary for this inference request.
-        self.configs_labels_dict = modif_request['config_labels_dict']
-
+        #Setting the semantic id dictionary for this inference request.
+        if self.semantic_id_dict == None:
+            raise Exception('The semantic id dict should have been set at app initialisation!')
+        else:
+            if self.semantic_id_dict != sample_level_semantic_id_dict:
+                raise Exception('The semantic id dict provided in the request does not match the one stored in the algorithm state! Cannot proceed with inference!')
 
         pred, probs_tensor, affine = app(request=modif_request)
 
@@ -394,7 +429,20 @@ class InferApp:
 if __name__ == '__main__':
    
     infer_app = InferApp(
-        infer_device=torch.device('cuda', index=0)
+        infer_device=torch.device('cuda', index=0),
+        dataset_level_schema={
+            'data_schema': {
+            'dataset_name':'BraTS2021_t2',
+            'dataset_image_channels': {            
+                "T2w": "0"
+            },
+            'task_channels': ["T2w"]
+            },
+            'segmentation_task_schema': {
+                'semantic_id_dict': {'background':0, 'tumor':1}
+            }
+        },
+        adaptation_config_name=None
         )
 
     infer_app.app_configs()
@@ -420,13 +468,13 @@ if __name__ == '__main__':
         },
         # 'infer_mode':'IS_interactive_edit',
         'infer_mode': 'IS_interactive_init',
-        'config_labels_dict':{'background':0, 'tumor':1},
-        'dataset_info':{
-            'dataset_name':'BraTS2021_t2',
-            'dataset_image_channels': {            
-                "T2w": "0"
+        'sample_level_schema': {
+            'data_schema': {
+                'task_channels': ["T2w"]
             },
-            'task_channels': ["T2w"]
+            'segmentation_task_schema': {
+                'semantic_id_dict': {'background':0, 'tumor':1},
+            }
         },
         'i_state':
             {
