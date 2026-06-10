@@ -157,22 +157,20 @@ class InferApp:
 
             #First we add the background points, then the foreground. We always want the center of the last interaction to be the foreground class,
             #as this is most likely to be within the region of interest of the target.
+            all_pts_indices = []
             if bg_code in points_lbs:
-                bg_idx = (torch.cat(points_lbs) == bg_code).nonzero(as_tuple=True)
-                for idx in bg_idx[0]:
-                    self.session.add_point_interaction(
-                        tuple(points[idx].flatten().tolist()),
-                        include_interaction=False,
-                        run_prediction=False
-                    )
+                bg_idx = (torch.cat(points_lbs) == bg_code).nonzero(as_tuple=True)[0]
+                all_pts_indices.extend([(i, False) for i in bg_idx])
             if fg_code in points_lbs:
-                fg_idx = (torch.cat(points_lbs) == fg_code).nonzero(as_tuple=True)
-                for idx in fg_idx[0]:
-                    self.session.add_point_interaction(
-                        tuple(points[idx].flatten().tolist()),
-                        include_interaction=True,
-                        run_prediction=False
-                    )
+                fg_idx = (torch.cat(points_lbs) == fg_code).nonzero(as_tuple=True)[0]
+                all_pts_indices.extend([(i, True) for i in fg_idx])
+            for j, (idx, include) in enumerate(all_pts_indices):
+                self.session.add_point_interaction(
+                    tuple(torch.floor(points[idx]).flatten().to(torch.int64).tolist()),
+                    include_interaction=include,
+                    run_prediction=False,
+                    skip_interaction_decay=(j > 0)
+                )
                 
         elif provided_ptypes[0].title() == "Scribbles":
             raise NotImplementedError('Conversion from api-structure to array form not yet implemented')
@@ -194,7 +192,7 @@ class InferApp:
 
             #Now we convert the bounding boxes to the expected format, which is to have the bboxes represented by a half-open interval. As opposed to the 
             #closed interval representation used in the API. The upper bound is the open end.
-            temp_bboxes = torch.cat(bboxes, dim=0)
+            temp_bboxes = torch.floor(torch.cat(bboxes, dim=0))
             temp_bboxes[:, 3:] += 1 #Converting to half-open interval representation by adding 1 to the upper bounds.
             #Clamping the bounding boxes to be within the image dimensions.
             temp_bboxes[:, :3] = torch.max(torch.zeros(temp_bboxes.shape[0], 3), temp_bboxes[:, :3])
@@ -212,40 +210,30 @@ class InferApp:
             
             #Each bbox will have structure [[x_min, x_max], [y_min, y_max], [z_min, z_max]] now, as expected. 
 
-            #Lets handle the bbox labels, first we will make the common sense restriction that each class can only have 1 bounding box per callback. 
-            # Not even the most restrictive case (i.e., only one class can have an interaction). 
-            
-            bin_counts = torch.bincount(torch.stack(bboxes_lbs).flatten())
-            if any([count > 1 for count in bin_counts]):
-                raise Exception('Each class can only have one bounding box prompt at a given time! Cannot proceed with interactive inference!')
-            if bin_counts.shape[0] > 2:
-                raise Exception('More than two class labels were provided bounding box prompts OR bbox label was outside of the [0,1] range! Cannot proceed with interactive inference!') 
-            
-            #First we will look at the background class, then the foreground class, because we want the center of the last interaction to be the foreground class.
             bg_code = self.semantic_id_dict['background']
-            
             if bg_code != 0:
                 raise Exception('Script written assuming background is assigned class 0! Cannot proceed with inference!')
-            if bg_code in bboxes_lbs:
-                bg_idx = (torch.cat(bboxes_lbs) == bg_code).nonzero(as_tuple=True)
-                if len(bg_idx[0]) > 1:
-                    raise Exception('Each class can only have one bounding box prompt at a given time! Cannot proceed with interactive inference!')
-                bg_idx = bg_idx[0].item()
+            fg_code = self.semantic_id_dict[[k for k in self.semantic_id_dict if k != 'background'][0]]
+
+            is_3d = any(not any(box[0, i] == box[0, i+3] for i in range(3)) for box in bboxes)
+
+            flat_labels = torch.cat(bboxes_lbs)
+            bg_indices = (flat_labels == bg_code).nonzero(as_tuple=True)[0].tolist()
+            fg_indices = (flat_labels == fg_code).nonzero(as_tuple=True)[0].tolist()
+
+            if is_3d:
+                bin_counts = torch.bincount(flat_labels)
+                if any(c > 1 for c in bin_counts):
+                    raise Exception('3D bounding boxes: each class can only have one bbox per callback.')
+                if bin_counts.shape[0] > 2:
+                    raise Exception('3D bounding boxes: labels must be 0 or 1.')
+            all_box_indices = [(i, False) for i in bg_indices] + [(i, True) for i in fg_indices]
+            for j, (idx, include) in enumerate(all_box_indices):
                 self.session.add_bbox_interaction(
-                    converted_bboxes[bg_idx],
-                    include_interaction=False,
-                    run_prediction=False
-                )
-            fg_code = self.semantic_id_dict[[k for k in self.semantic_id_dict.keys() if k != 'background'][0]]
-            if fg_code in bboxes_lbs:
-                fg_idx = (torch.cat(bboxes_lbs) == fg_code).nonzero(as_tuple=True)
-                if len(fg_idx[0]) > 1:
-                    raise Exception('Each class can only have one bounding box prompt at a given time! Cannot proceed with interactive inference!')
-                fg_idx = fg_idx[0].item()
-                self.session.add_bbox_interaction(
-                    converted_bboxes[fg_idx],
-                    include_interaction=True,
-                    run_prediction=False
+                    converted_bboxes[idx],
+                    include_interaction=include,
+                    run_prediction=False,
+                    skip_interaction_decay=(j > 0)
                 )
     
         elif provided_ptypes[0].title() == "Lasso":

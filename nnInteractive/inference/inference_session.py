@@ -197,7 +197,7 @@ class nnInteractiveInferenceSession():
         empty_cache(self.device)
         self.has_positive_bbox = False
 
-    def add_bbox_interaction(self, bbox_coords, include_interaction: bool, run_prediction: bool = True) -> np.ndarray:
+    def add_bbox_interaction(self, bbox_coords, include_interaction: bool, run_prediction: bool = True, skip_interaction_decay: bool = False) -> np.ndarray:
         if include_interaction:
             self.has_positive_bbox = True
 
@@ -242,7 +242,8 @@ class nnInteractiveInferenceSession():
         self._add_patch_for_bbox_interaction(transformed_bbox_coordinates)
 
         # decay old interactions
-        self.interactions[-6:-4] *= self.interaction_decay
+        if not skip_interaction_decay:
+            self.interactions[-6:-4] *= self.interaction_decay
 
         # place bbox
         slicer = tuple([slice(*i) for i in transformed_bbox_coordinates])
@@ -253,7 +254,7 @@ class nnInteractiveInferenceSession():
         if run_prediction:
             self._predict()
 
-    def add_point_interaction(self, coordinates: Tuple[int, ...], include_interaction: bool, run_prediction: bool = True):
+    def add_point_interaction(self, coordinates: Tuple[int, ...], include_interaction: bool, run_prediction: bool = True, skip_interaction_decay: bool = False):
         self._finish_preprocessing_and_initialize_interactions()
 
         transformed_coordinates = [round(i) for i in transform_coordinates_noresampling(coordinates,
@@ -262,7 +263,8 @@ class nnInteractiveInferenceSession():
         self._add_patch_for_point_interaction(transformed_coordinates)
 
         # decay old interactions
-        self.interactions[-4:-2] *= self.interaction_decay
+        if not skip_interaction_decay:
+            self.interactions[-4:-2] *= self.interaction_decay
 
         interaction_channel = -4 if include_interaction else -3
         self.interactions[interaction_channel] = self.point_interaction.place_point(
@@ -270,7 +272,7 @@ class nnInteractiveInferenceSession():
         if run_prediction:
             self._predict()
 
-    def add_scribble_interaction(self, scribble_image: np.ndarray,  include_interaction: bool, run_prediction: bool = True):
+    def add_scribble_interaction(self, scribble_image: np.ndarray,  include_interaction: bool, run_prediction: bool = True, skip_interaction_decay: bool = False):
         assert all([i == j for i, j in zip(self.original_image_shape[1:], scribble_image.shape)]), f'Given scribble image must match input image shape. Input image was: {self.original_image_shape[1:]}, given: {scribble_image.shape}'
         self._finish_preprocessing_and_initialize_interactions()
 
@@ -282,7 +284,8 @@ class nnInteractiveInferenceSession():
         self._add_patch_for_scribble_interaction(scribble_image)
 
         # decay old interactions
-        self.interactions[-2:] *= self.interaction_decay
+        if not skip_interaction_decay:
+            self.interactions[-2:] *= self.interaction_decay
 
         interaction_channel = -2 if include_interaction else -1
         torch.maximum(self.interactions[interaction_channel], scribble_image.to(self.interactions.device),
@@ -292,7 +295,7 @@ class nnInteractiveInferenceSession():
         if run_prediction:
             self._predict()
 
-    def add_lasso_interaction(self, lasso_image: np.ndarray,  include_interaction: bool, run_prediction: bool = True):
+    def add_lasso_interaction(self, lasso_image: np.ndarray,  include_interaction: bool, run_prediction: bool = True, skip_interaction_decay: bool = False):
         assert all([i == j for i, j in zip(self.original_image_shape[1:], lasso_image.shape)]), f'Given lasso image must match input image shape. Input image was: {self.original_image_shape[1:]}, given: {lasso_image.shape}'
         self._finish_preprocessing_and_initialize_interactions()
 
@@ -304,7 +307,8 @@ class nnInteractiveInferenceSession():
         self._add_patch_for_lasso_interaction(lasso_image)
 
         # decay old interactions
-        self.interactions[-6:-4] *= self.interaction_decay
+        if not skip_interaction_decay:
+            self.interactions[-6:-4] *= self.interaction_decay
 
         # lasso is written into bbox channel
         interaction_channel = -6 if include_interaction else -5
