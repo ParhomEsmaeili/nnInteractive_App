@@ -266,8 +266,14 @@ class InferApp:
         if self.dataset_level_schema is None:
             raise Exception('The dataset level schema must have been set during initialisation!')
         else:
-            if self.dataset_level_schema['data_schema']['task_channels'] != request['sample_level_schema']['data_schema']['task_channels']:
-                raise Exception('The task channels provided in the sample level schema do not match the ones specified in the dataset level schema! Cannot proceed with inference!')
+            # Sample-level task_channels must be a subset of the dataset-level vocabulary, not
+            # identical to it — a case can legitimately have fewer channels present than the
+            # dataset-wide convention (IS_Validate's generate_sample_level_schema now derives a
+            # genuine per-sample channel list rather than echoing the dataset-level value). set(...)
+            # works whether task_channels is a list of names or a dict keyed by name — both give
+            # the same set of channel names either way.
+            if not set(request['sample_level_schema']['data_schema']['task_channels']) <= set(self.dataset_level_schema['data_schema']['task_channels']):
+                raise Exception('The task channels provided in the sample level schema are not a subset of those specified in the dataset level schema! Cannot proceed with inference!')
         if len(request['sample_level_schema']['data_schema']['task_channels']) != 1:
             raise Exception('The inference app only supports single channel images for segmentation.')
         
