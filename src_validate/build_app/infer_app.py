@@ -176,7 +176,7 @@ class InferApp:
             scribbles = p_dict[0][provided_ptypes[0]]
             scribbles_lbs = p_dict[1][provided_ptypes[0] + '_labels']
             #The axis perpendicular to the plane each scribble was drawn in (one per scribble, in the same order as the labels).
-            #NOTE: Field name/placement as proposed to the IS_Validate side, update here if the final API definition differs.
+            #NOTE: Field name/placement as defined in the IS_Validate API: interactions_labels['scribbles_slice_axes'].
             scribbles_slice_axes = p_dict[1].get(provided_ptypes[0] + '_slice_axes')
             if scribbles_slice_axes is None:
                 raise Exception('Scribbles must be provided with their slice axes (scribbles_slice_axes)! Cannot proceed with interactive inference!')
