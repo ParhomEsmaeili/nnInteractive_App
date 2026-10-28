@@ -37,12 +37,12 @@ class InferApp:
         self.autoseg_infer = False #This is a variable for storing the action taken in the instance where there is no prompting information provided in a slice.
         #In the case where it is True, a prediction will be made, and the stored pred and output pred will be the same.
         #In the case where it is False, a prediction will not be made, the stored pred will be None, and the output pred will be zeroes.
-        self.permitted_prompts = ('points', 'bboxes', 'scribbles', 'lasso') 
+        self.permitted_prompts = ('points', 'bboxes', 'scribbles', 'lassos')
         self.prompt_subtypes = {
             'points':'free_prompts',
-            'scribbles':'free_prompts', 
+            'scribbles':'free_prompts',
             'bboxes': 'partition_prompts',
-            'lasso':'partition_prompts'
+            'lassos':'partition_prompts'
         }
         self.app_params = {
             'autoseg_infer_bool': self.autoseg_infer,
