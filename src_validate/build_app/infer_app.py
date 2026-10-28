@@ -173,8 +173,41 @@ class InferApp:
                 )
                 
         elif provided_ptypes[0].title() == "Scribbles":
-            raise NotImplementedError('Conversion from api-structure to array form not yet implemented')
-            
+            scribbles = p_dict[0][provided_ptypes[0]]
+            scribbles_lbs = p_dict[1][provided_ptypes[0] + '_labels']
+            #The axis perpendicular to the plane each scribble was drawn in (one per scribble, in the same order as the labels).
+            #NOTE: Field name/placement as proposed to the IS_Validate side, update here if the final API definition differs.
+            scribbles_slice_axes = p_dict[1].get(provided_ptypes[0] + '_slice_axes')
+            if scribbles_slice_axes is None:
+                raise Exception('Scribbles must be provided with their slice axes (scribbles_slice_axes)! Cannot proceed with interactive inference!')
+
+            bg_code = self.semantic_id_dict['background']
+            if bg_code != 0:
+                raise Exception('Script written assuming background is assigned class 0! Cannot proceed with inference!')
+            fg_code = self.semantic_id_dict[[k for k in self.semantic_id_dict.keys() if k != 'background'][0]]
+
+            flat_lbs = torch.cat([lb.reshape(-1) for lb in scribbles_lbs])
+            if len(scribbles) != flat_lbs.shape[0]:
+                raise Exception('Each scribble must have exactly one label! Cannot proceed with interactive inference!')
+            if len(scribbles_slice_axes) != len(scribbles):
+                raise Exception('Each scribble must have exactly one slice axis! Cannot proceed with interactive inference!')
+            if not torch.isin(flat_lbs, torch.tensor([bg_code, fg_code])).all():
+                raise Exception('Scribble labels must be either the background or the (single) foreground class code!')
+
+            #As with points: background scribbles first, foreground last, so that the zoom centre is set by the foreground scribble.
+            #Each scribble is rasterised into its own full-volume binary mask and placed one at a time, because the session's
+            #decay is applied once per call, and the sequentiality (decay) is only applied for the first scribble placed.
+            bg_idx = (flat_lbs == bg_code).nonzero(as_tuple=True)[0].tolist()
+            fg_idx = (flat_lbs == fg_code).nonzero(as_tuple=True)[0].tolist()
+            all_scribble_indices = [(i, False) for i in bg_idx] + [(i, True) for i in fg_idx]
+            for j, (idx, include) in enumerate(all_scribble_indices):
+                self.session.add_scribble_interaction(
+                    self.scribble_coords_to_mask(scribbles[idx], int(torch.as_tensor(scribbles_slice_axes[idx]).reshape(-1)[0])),
+                    include_interaction=include,
+                    run_prediction=False,
+                    skip_interaction_decay=(j > 0)
+                )
+
         elif provided_ptypes[0].title() == "Bboxes":   
             #The pre-trained model is trained with 2D bounding boxes in mind. The API will use a convention 
             # that any of the coordinates must be matching. E.g. x_min = x_max, etc, to indicate this. However, the format expected for a 2D bounding box
@@ -242,6 +275,59 @@ class InferApp:
             raise Exception('No other prompting subtypes are supported in nnInteractive.')
 
 
+
+    def scribble_coords_to_mask(self, coords: torch.Tensor, slice_axis: int) -> np.ndarray:
+        '''
+        Converts one API-format scribble (an N_sp x 3 tensor of voxel coordinates) into the full-volume binary
+        uint8 mask expected by the session's add_scribble_interaction (nnInteractive's scribble channel encoding).
+
+        This mirrors the nnInteractive front-end brush: scribbles are drawn on a single 2D slice, and each coordinate
+        is stamped with a 2D disc of diameter preferred_scribble_thickness[slice_axis] (in voxels, no spacing weighting)
+        in the plane perpendicular to the slice axis. The mask is the union of the stamps, and is binary (0/1).
+
+        slice_axis is the axis perpendicular to the plane the scribble was drawn in, as declared with the scribble.
+        '''
+        image_shape = tuple(int(s) for s in self.session.original_image_shape[1:])
+        coords = torch.floor(coords.detach().cpu().to(torch.float32)).to(torch.int64)
+        if coords.ndim != 2 or coords.shape[1] != len(image_shape):
+            raise Exception(f'Scribble coordinates must have shape N x {len(image_shape)}, received {tuple(coords.shape)}!')
+
+        if not 0 <= slice_axis < len(image_shape):
+            raise Exception(f'Scribble slice axis must be in [0, {len(image_shape)}), received {slice_axis}!')
+        #Sanity check on this side: a scribble drawn on a slice has a single coordinate value along the slice axis.
+        if coords[:, slice_axis].unique().numel() > 1:
+            raise Exception(f'Scribble coordinates are not constant along the declared slice axis ({slice_axis})!')
+        inplane_axes = [a for a in range(coords.shape[1]) if a != slice_axis]
+
+        in_bounds = ((coords >= 0) & (coords < torch.tensor(image_shape))).all(dim=1)
+        if not in_bounds.all():
+            warnings.warn(f'{int((~in_bounds).sum())} scribble coordinate(s) fell outside the image and were discarded!')
+            coords = coords[in_bounds]
+
+        mask = np.zeros(image_shape, dtype=np.uint8)
+        if coords.shape[0] == 0:
+            return mask #Empty scribble: the session handles this gracefully (no patch added, nothing placed).
+
+        thickness = self.session.preferred_scribble_thickness
+        if not isinstance(thickness, (tuple, list)):
+            thickness = [thickness] * len(image_shape)
+        #Same radius rule as napari's Labels brush: the +0.5 keeps any voxel from sitting exactly on the radius.
+        radius = np.floor(thickness[slice_axis] / 2) + 0.5
+        reach = int(np.floor(radius))
+        offsets = np.stack(np.meshgrid(np.arange(-reach, reach + 1), np.arange(-reach, reach + 1), indexing='ij'), axis=-1).reshape(-1, 2)
+        offsets = offsets[(offsets ** 2).sum(axis=1) <= radius ** 2]
+
+        #Stamping the disc at every coordinate (in-plane), keeping only those voxels that fall within the image.
+        centres = coords[:, inplane_axes].numpy()
+        stamped = (centres[:, None, :] + offsets[None, :, :]).reshape(-1, 2)
+        inplane_shape = np.array([image_shape[a] for a in inplane_axes])
+        stamped = stamped[((stamped >= 0) & (stamped < inplane_shape)).all(axis=1)]
+
+        idx = [None] * len(image_shape)
+        idx[slice_axis] = int(coords[0, slice_axis])
+        idx[inplane_axes[0]], idx[inplane_axes[1]] = stamped[:, 0], stamped[:, 1]
+        mask[tuple(idx)] = 1
+        return mask
 
     def binary_predict(self):
         '''
